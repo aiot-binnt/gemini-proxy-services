@@ -43,4 +43,4 @@ app.log*
 Thumbs.db
 
 # Docker
-.dockerignore
+# .dockerignore should be version controlled

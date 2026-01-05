@@ -12,12 +12,25 @@ services:
       - PORT=5001
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - FLASK_DEBUG=${FLASK_DEBUG:-False}
-    volumes:
-      - ./app.log:/app/app.log
     restart: unless-stopped
+    # Resource limits (adjust based on your needs)
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5001/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5001/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 40s
+    # Logs are sent to stdout/stderr for better container orchestration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
