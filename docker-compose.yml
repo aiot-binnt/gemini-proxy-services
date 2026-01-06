@@ -7,11 +7,20 @@ services:
     ports:
       - "5001:5001"
     environment:
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      # Google Cloud Vertex AI Configuration
+      - GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}
+      - GOOGLE_CLOUD_LOCATION=${GOOGLE_CLOUD_LOCATION:-us-central1}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/secrets/service-account.json
+      # API Keys for client authentication
       - API_KEYS=${API_KEYS}
+      # Server Configuration
       - PORT=5001
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - FLASK_DEBUG=${FLASK_DEBUG:-False}
+    volumes:
+      # Mount service account credentials (read-only)
+      # Create this file on your server: /opt/secrets/gemini-service-account.json
+      - /opt/secrets/gemini-service-account.json:/app/secrets/service-account.json:ro
     restart: unless-stopped
     # Resource limits (adjust based on your needs)
     deploy:

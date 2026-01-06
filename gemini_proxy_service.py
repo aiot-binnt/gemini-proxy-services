@@ -1,18 +1,66 @@
 """
-Gemini Proxy Service - Optimized Version
-Handles proxy requests to Google Gemini API with optimized configuration.
+Gemini Proxy Service - Vertex AI Version
+Handles proxy requests to Google Vertex AI Gemini API with service account authentication.
 """
 
+import os
 import logging
-import google.generativeai as genai
+import vertexai
+from vertexai.generative_models import GenerativeModel, GenerationConfig
 from typing import Dict, Any, Optional
-from google.api_core.exceptions import GoogleAPIError, ResourceExhausted, Unauthenticated
+from google.api_core.exceptions import (
+    GoogleAPIError, 
+    ResourceExhausted, 
+    PermissionDenied,
+    InvalidArgument,
+    DeadlineExceeded,
+    ServiceUnavailable,
+    Unauthenticated
+)
 
 logger = logging.getLogger(__name__)
 
 # Configuration
 MAX_PROMPT_LENGTH = 10000
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-2.0-flash-exp"
+
+# Error code to HTTP status code mapping
+ERROR_HTTP_STATUS = {
+    "AUTH_ERROR": 401,
+    "CREDENTIALS_ERROR": 401,
+    "PERMISSION_DENIED": 403,
+    "BILLING_DISABLED": 403,
+    "VALIDATION_ERROR": 400,
+    "CONTENT_SAFETY_ERROR": 400,
+    "MODEL_NOT_FOUND": 404,
+    "QUOTA_ERROR": 429,
+    "RATE_LIMIT_ERROR": 429,
+    "TIMEOUT_ERROR": 504,
+    "NETWORK_ERROR": 502,
+    "SERVICE_UNAVAILABLE": 503,
+    "CONFIG_ERROR": 500,
+    "API_ERROR": 500,
+    "INTERNAL_ERROR": 500,
+}
+
+# Initialize Vertex AI once when module loads
+_vertex_ai_initialized = False
+_vertex_ai_init_error = None
+
+try:
+    project = os.getenv('GOOGLE_CLOUD_PROJECT')
+    location = os.getenv('GOOGLE_CLOUD_LOCATION', 'us-central1')
+    
+    if not project:
+        raise ValueError("GOOGLE_CLOUD_PROJECT environment variable is required")
+    
+    vertexai.init(project=project, location=location)
+    _vertex_ai_initialized = True
+    logger.info(f"Vertex AI initialized: project={project}, location={location}")
+except Exception as e:
+    _vertex_ai_init_error = str(e)
+    logger.error(f"Failed to initialize Vertex AI: {_vertex_ai_init_error}")
+    logger.error("Service will not be able to process requests until this is fixed!")
 
 # Configure transport optimizations
 import google.auth.transport.requests
@@ -59,59 +107,68 @@ class GeminiProxyService:
             return False, f"Prompt too long. Maximum {MAX_PROMPT_LENGTH} characters allowed"
         return True, None
     
-    @staticmethod
-    def validate_api_key(api_key: str) -> tuple[bool, Optional[str]]:
-        """Validate API key format."""
-        if not api_key:
-            return False, "Gemini API key is required"
-        if len(api_key) < 20:
-            return False, "Invalid API key format"
-        return True, None
-    
+
     @staticmethod
     def call_gemini_api(
         prompt: str,
-        model_name: str,
-        api_key: str
+        model_name: str
     ) -> Dict[str, Any]:
         """
-        Call Gemini API with optimized configuration and error handling.
+        Call Vertex AI Gemini API with optimized configuration and error handling.
+        Uses service account authentication configured via environment variables.
         
         Args:
             prompt: The prompt text
             model_name: The model to use
-            api_key: The Gemini API key
             
         Returns:
             Dict with 'success', 'response' (if success), 'error_code', 'error_message'
         """
         try:
-            # Configure Gemini with the API key
-            genai.configure(api_key=api_key)
-            
-            # Create model instance with optimized generation config
-            model = genai.GenerativeModel(
-                model_name=model_name,
-                generation_config={
-                    'temperature': 0.7,
-                    'top_p': 0.95,
-                    'top_k': 40,
-                    'max_output_tokens': 8192,
+            # Check if Vertex AI was initialized successfully
+            if not _vertex_ai_initialized:
+                return {
+                    "success": False,
+                    "error_code": "CONFIG_ERROR",
+                    "error_message": "Vertex AI initialization failed",
+                    "details": _vertex_ai_init_error or "Unknown initialization error",
+                    "action": "Check GOOGLE_CLOUD_PROJECT and GOOGLE_APPLICATION_CREDENTIALS environment variables"
                 }
+            
+            # Create generation config
+            generation_config = GenerationConfig(
+                temperature=0.7,
+                top_p=0.95,
+                top_k=40,
+                max_output_tokens=8192,
+            )
+            
+            # Create model instance with Vertex AI
+            model = GenerativeModel(
+                model_name=model_name,
+                generation_config=generation_config
             )
             
             # Generate content
-            logger.info(f"Calling Gemini API: model={model_name}, prompt_length={len(prompt)}")
+            logger.info(f"Calling Vertex AI Gemini: model={model_name}, prompt_length={len(prompt)}")
             response = model.generate_content(
                 prompt,
-                request_options={
-                    'timeout': 30,  # 30 second timeout
-                }
+                generation_config=generation_config
             )
             
             # Extract response text and clean it
             response_text = response.text if hasattr(response, 'text') else str(response)
             response_text = response_text.strip()
+            
+            # Validate response is not empty
+            if not response_text:
+                logger.warning("Received empty response from Vertex AI")
+                return {
+                    "success": False,
+                    "error_code": "API_ERROR",
+                    "error_message": "Received empty response from Vertex AI",
+                    "action": "Try rephrasing your prompt or use a different model"
+                }
             
             return {
                 "success": True,
@@ -119,86 +176,150 @@ class GeminiProxyService:
             }
             
         except ResourceExhausted as e:
-            logger.warning(f"Gemini quota exhausted: {str(e)}")
+            logger.warning(f"Vertex AI quota exhausted: {str(e)}")
             return {
                 "success": False,
                 "error_code": "QUOTA_ERROR",
-                "error_message": "Gemini API quota exceeded. Please try again later."
+                "error_message": "Vertex AI quota exceeded. Please try again later.",
+                "action": "Wait a few minutes or check quota limits in Google Cloud Console",
+                "help_url": f"https://console.cloud.google.com/apis/api/aiplatform.googleapis.com/quotas?project={os.getenv('GOOGLE_CLOUD_PROJECT')}"
             }
-            
-        except Unauthenticated as e:
-            logger.error(f"Gemini authentication failed: {str(e)}")
-            return {
-                "success": False,
-                "error_code": "AUTH_ERROR",
-                "error_message": "Invalid Gemini API key. Please check your credentials."
-            }
-            
-        except GoogleAPIError as e:
-            logger.error(f"Gemini API error: {str(e)}")
+        
+        except InvalidArgument as e:
+            logger.error(f"Invalid argument: {str(e)}")
             error_msg = str(e)
             
-            if "not found" in error_msg.lower() or "does not exist" in error_msg.lower():
+            # Check for content safety violations
+            if "safety" in error_msg.lower() or "block" in error_msg.lower():
                 return {
                     "success": False,
-                    "error_code": "MODEL_NOT_FOUND",
-                    "error_message": f"Model '{model_name}' not found or not accessible."
+                    "error_code": "CONTENT_SAFETY_ERROR",
+                    "error_message": "Content was blocked by safety filters",
+                    "details": "Your prompt may contain inappropriate content",
+                    "action": "Modify your prompt to comply with content safety guidelines"
                 }
             
             return {
                 "success": False,
+                "error_code": "VALIDATION_ERROR",
+                "error_message": f"Invalid request: {error_msg}",
+                "action": "Check your prompt and model parameters"
+            }
+        
+        except DeadlineExceeded as e:
+            logger.error(f"Request timeout: {str(e)}")
+            return {
+                "success": False,
+                "error_code": "TIMEOUT_ERROR",
+                "error_message": "Request timed out",
+                "details": "The API request took too long to complete",
+                "action": "Try again with a shorter prompt or simpler request"
+            }
+        
+        except ServiceUnavailable as e:
+            logger.error(f"Service unavailable: {str(e)}")
+            return {
+                "success": False,
+                "error_code": "SERVICE_UNAVAILABLE",
+                "error_message": "Vertex AI service is temporarily unavailable",
+                "action": "Please try again in a few moments"
+            }
+        
+        except Unauthenticated as e:
+            logger.error(f"Authentication failed: {str(e)}")
+            return {
+                "success": False,
+                "error_code": "CREDENTIALS_ERROR",
+                "error_message": "Invalid or expired service account credentials",
+                "details": str(e),
+                "action": "Verify GOOGLE_APPLICATION_CREDENTIALS points to a valid service account JSON key"
+            }
+            
+        except PermissionDenied as e:
+            logger.error(f"Vertex AI permission denied: {str(e)}")
+            error_msg = str(e)
+            project_id = os.getenv('GOOGLE_CLOUD_PROJECT')
+            
+            # Check if it's a billing issue
+            if "billing" in error_msg.lower() and "disabled" in error_msg.lower():
+                return {
+                    "success": False,
+                    "error_code": "BILLING_DISABLED",
+                    "error_message": "Billing is not enabled for this Google Cloud project",
+                    "details": "Vertex AI requires an active billing account",
+                    "action": "Enable billing in Google Cloud Console",
+                    "help_url": f"https://console.cloud.google.com/billing/enable?project={project_id}"
+                }
+            
+            # Regular permission denied
+            return {
+                "success": False,
+                "error_code": "PERMISSION_DENIED",
+                "error_message": "Service account lacks required permissions",
+                "details": error_msg,
+                "action": "Grant 'Vertex AI User' role to your service account in IAM",
+                "help_url": f"https://console.cloud.google.com/iam-admin/iam?project={project_id}"
+            }
+            
+        except GoogleAPIError as e:
+            logger.error(f"Vertex AI API error: {str(e)}")
+            error_msg = str(e)
+            
+            # Model not found
+            if "not found" in error_msg.lower() or "does not exist" in error_msg.lower():
+                return {
+                    "success": False,
+                    "error_code": "MODEL_NOT_FOUND",
+                    "error_message": f"Model '{model_name}' not found or not accessible in Vertex AI",
+                    "action": "Check model name spelling and availability in your region",
+                    "help_url": "https://cloud.google.com/vertex-ai/generative-ai/docs/learn/models"
+                }
+            
+            # Rate limit (different from quota)
+            if "rate" in error_msg.lower() and "limit" in error_msg.lower():
+                return {
+                    "success": False,
+                    "error_code": "RATE_LIMIT_ERROR",
+                    "error_message": "Rate limit exceeded",
+                    "details": "Too many requests in a short time",
+                    "action": "Wait a moment and retry with exponential backoff"
+                }
+            
+            # Generic API error
+            return {
+                "success": False,
                 "error_code": "API_ERROR",
-                "error_message": f"Gemini API error: {error_msg}"
+                "error_message": "Vertex AI API error occurred",
+                "details": error_msg
             }
             
         except Exception as e:
-            logger.error(f"Unexpected error calling Gemini API: {str(e)}", exc_info=True)
+            logger.error(f"Unexpected error calling Vertex AI: {str(e)}", exc_info=True)
             return {
                 "success": False,
                 "error_code": "INTERNAL_ERROR",
-                "error_message": f"Internal error: {str(e)}"
+                "error_message": "An unexpected internal error occurred",
+                "details": str(e),
+                "action": "Check application logs for more details"
             }
     
     @classmethod
     def process_proxy_request(
         cls,
         prompt: str,
-        model_name: Optional[str] = None,
-        api_key: Optional[str] = None,
-        fallback_api_key: Optional[str] = None
+        model_name: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Process a complete proxy request with all validations.
+        Uses service account authentication configured via environment variables.
         
         Args:
             prompt: The prompt text
             model_name: Optional model name (defaults to DEFAULT_MODEL)
-            api_key: Optional custom API key
-            fallback_api_key: Fallback API key from server config
             
         Returns:
             Dict with 'success', 'response' or 'error_code', 'error_message'
         """
-        # Check if user is providing custom values
-        has_custom_model = model_name is not None and model_name.strip() != ""
-        has_custom_key = api_key is not None and api_key.strip() != ""
-        
-        # Validation: If providing custom model, must also provide custom key
-        if has_custom_model and not has_custom_key:
-            return {
-                "success": False,
-                "error_code": "VALIDATION_ERROR",
-                "error_message": "Custom model requires custom api_key. Please provide both 'model' and 'api_key' together, or omit both to use defaults."
-            }
-        
-        # Validation: If providing custom key, must also provide custom model
-        if has_custom_key and not has_custom_model:
-            return {
-                "success": False,
-                "error_code": "VALIDATION_ERROR",
-                "error_message": "Custom api_key requires custom model. Please provide both 'model' and 'api_key' together, or omit both to use defaults."
-            }
-        
         # Use default model if not provided
         model = (model_name or DEFAULT_MODEL).strip()
         
@@ -220,19 +341,15 @@ class GeminiProxyService:
                 "error_message": model_error
             }
         
-        # Determine which API key to use
-        key_to_use = (api_key or fallback_api_key or "").strip()
-        
-        # Validate API key
-        valid_key, key_error = cls.validate_api_key(key_to_use)
-        if not valid_key:
+        # Verify Vertex AI is configured
+        if not os.getenv('GOOGLE_CLOUD_PROJECT'):
             return {
                 "success": False,
                 "error_code": "CONFIG_ERROR",
-                "error_message": key_error
+                "error_message": "GOOGLE_CLOUD_PROJECT environment variable is required for Vertex AI authentication"
             }
         
-        # Call Gemini API
-        result = cls.call_gemini_api(prompt, model, key_to_use)
+        # Call Vertex AI Gemini API
+        result = cls.call_gemini_api(prompt, model)
         
         return result

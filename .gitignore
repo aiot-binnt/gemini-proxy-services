@@ -44,3 +44,14 @@ Thumbs.db
 
 # Docker
 # .dockerignore should be version controlled
+
+# Google Cloud Credentials - NEVER COMMIT THESE!
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+service-account*.json
+*-key.json
+credentials/
+secrets/
+

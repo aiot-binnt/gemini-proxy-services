@@ -9,7 +9,7 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 from prometheus_client import Counter, Histogram, generate_latest, REGISTRY
 
-from gemini_proxy_service import GeminiProxyService, DEFAULT_MODEL
+from gemini_proxy_service import GeminiProxyService, DEFAULT_MODEL, ERROR_HTTP_STATUS
 
 # --- Configuration & Logging Setup ---
 load_dotenv()
@@ -73,15 +73,19 @@ def health_check():
 @REQUEST_LATENCY.time()
 def gemini_proxy():
     """
-    Optimized proxy endpoint for Gemini API calls.
-    Configured with better timeouts and generation settings for 2-4x performance improvement.
+    Vertex AI Gemini proxy endpoint with service account authentication.
+    Uses Google Cloud service account for authentication (no API key needed in request).
     
     Request body:
     {
         "prompt": "Your prompt text here",
-        "model": "gemini-2.5-flash",  // optional, defaults to gemini-2.5-flash
-        "api_key": "your-gemini-api-key"  // optional, uses server's key if not provided
+        "model": "gemini-2.0-flash-exp"  // optional, defaults to gemini-2.0-flash-exp
     }
+    
+    Required environment variables:
+    - GOOGLE_CLOUD_PROJECT: Your GCP project ID
+    - GOOGLE_CLOUD_LOCATION: Region (e.g., us-central1)
+    - GOOGLE_APPLICATION_CREDENTIALS: Path to service account JSON key
     """
     start_time = time.time()
     data = request.get_json() or {}
@@ -89,14 +93,11 @@ def gemini_proxy():
     # Extract parameters
     prompt = data.get("prompt", "")
     model_name = data.get("model")
-    custom_api_key = data.get("api_key")
     
-    # Process request using service layer
+    # Process request using service layer (no API key needed)
     result = GeminiProxyService.process_proxy_request(
         prompt=prompt,
-        model_name=model_name,
-        api_key=custom_api_key,
-        fallback_api_key=os.getenv('GEMINI_API_KEY')
+        model_name=model_name
     )
     
     processing_time = int((time.time() - start_time) * 1000)
@@ -112,18 +113,36 @@ def gemini_proxy():
         logger.info(f"Request completed successfully in {processing_time}ms")
         return api_response(True, data=result_data)
     else:
-        # Handle error
+        # Handle error with detailed information
         error_code = result.get("error_code", "INTERNAL_ERROR")
         error_message = result.get("error_message", "Unknown error")
+        error_details = result.get("details")
+        error_action = result.get("action")
+        error_help_url = result.get("help_url")
         
         REQUEST_COUNT.labels('gemini-proxy', 'error').inc()
+        logger.error(f"Request failed: {error_code} - {error_message}")
         
-        # Determine HTTP status code
-        status_code = 400 if error_code == "VALIDATION_ERROR" else 500
+        # Build error object
+        error_obj = {
+            "code": error_code,
+            "message": error_message
+        }
+        
+        # Add optional fields if present
+        if error_details:
+            error_obj["details"] = error_details
+        if error_action:
+            error_obj["action"] = error_action
+        if error_help_url:
+            error_obj["help_url"] = error_help_url
+        
+        # Determine HTTP status code from mapping
+        status_code = ERROR_HTTP_STATUS.get(error_code, 500)
         
         return api_response(
             False,
-            errors=[{"code": error_code, "message": error_message}],
+            errors=[error_obj],
             status=status_code
         )
 
