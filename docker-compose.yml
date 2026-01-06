@@ -19,8 +19,8 @@ services:
       - FLASK_DEBUG=${FLASK_DEBUG:-False}
     volumes:
       # Mount service account credentials (read-only)
-      # Create this file on your server: /opt/secrets/gemini-service-account.json
-      - /opt/secrets/gemini-service-account.json:/app/secrets/service-account.json:ro
+      # Using the JSON file from the project directory
+      - ./gen-lang-client-0682316968-81bcaa1a8ef9.json:/app/secrets/service-account.json:ro
     restart: unless-stopped
     # Resource limits (adjust based on your needs)
     deploy:
